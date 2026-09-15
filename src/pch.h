@@ -59,6 +59,7 @@
 #include "bf/net.h"
 
 #include "settings.h"
+#include "replay.h"
 
 extern HMODULE g_this_module;
 

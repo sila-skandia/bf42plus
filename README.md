@@ -71,6 +71,7 @@ These features are disabled by default. Edit `bf42plus.ini` in the game director
 - Show in the console who started a vote or voted (option `showVoteInConsole`)
 - You can start the game temporarily in windowed mode if u hold SHIFT while the game is starting and select Yes
 - You can fix the higher mouse sensitivity while moving by enabling `correctedLookSensitivity` option
+- Record a round replay (every server event plus a 10 Hz sample of all networked objects) to `replays/` with the `recordReplays` option or `plus.recordReplays 1` in the console. Experimental, the file format is not final.
 
 ### Planned features
 - A 3D map like the one in BF:Vietnam

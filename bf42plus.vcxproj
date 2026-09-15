@@ -65,6 +65,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Create</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="src\replay.cpp" />
     <ClCompile Include="src\settings.cpp" />
     <ClCompile Include="src\updater.cpp" />
     <ClCompile Include="src\util.cpp" />
@@ -84,6 +85,7 @@
     <ClInclude Include="src\debug.h" />
     <ClInclude Include="src\hooks.h" />
     <ClInclude Include="src\pch.h" />
+    <ClInclude Include="src\replay.h" />
     <ClInclude Include="src\settings.h" />
     <ClInclude Include="src\updater.h" />
     <ClInclude Include="src\util.h" />

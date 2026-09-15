@@ -60,6 +60,8 @@ GameEvent* GameEventManager::getNextRcvdEvent_hook()
     GameEvent* event = getNextRcvdEvent();
     if (!event) return 0;
 
+    replay_onEvent(event);
+
 
     switch (event->getType()) {
         case BF_CreatePlayerEvent: {

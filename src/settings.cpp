@@ -161,6 +161,7 @@ Settings::Settings()
         &wrapChat,
         &screenshotFormat,
         &hitIndicatorTime,
+        &recordReplays,
     };
 }
 

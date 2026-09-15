@@ -204,6 +204,12 @@ public:
         L"general", L"hitIndicatorTime",
         L"; Sets the time it takes for the hit indicator to disappear. Default is 1 second, 0 disables the indicator.",
         0, 1.0 };
+    BoolSetting recordReplays = {
+        L"general", L"recordReplays",
+        L"; Record every game event and a 10 Hz sample of all networked objects to\n"
+        L"; replays/replay_<timestamp>.ndjson while connected to a server. Experimental.\n"
+        L"; Can also be toggled in-game with plus.recordReplays 1/0.",
+        0, false };
 };
 
 extern Settings g_settings;

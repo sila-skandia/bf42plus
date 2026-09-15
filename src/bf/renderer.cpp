@@ -309,6 +309,8 @@ void hook_Renderer_draw_1()
     auto localPlayer = BFPlayer::getLocal();
     Pos3 playerPos = localPlayer->getVehicle()->getAbsolutePosition();
 
+    replay_onFrame();
+
     if (g_settings.enable3DMineMap && g_serverSettings.mine3DMap.allow) {
         auto& projectiles = ObjectManager_getProjectileMap();
         for (auto node = projectiles.head->left; node != projectiles.head; node = node->next()) {
