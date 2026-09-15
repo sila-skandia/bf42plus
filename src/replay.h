@@ -20,5 +20,9 @@ void replay_onEvent(GameEvent* event);
 // Called once per rendered frame while in-game. Throttles itself to the sample rate.
 void replay_onFrame();
 
+// Called for every line the chat box displays, including the recording
+// player's own, which never arrive as events.
+void replay_onChat(const wchar_t* text, size_t length, int playerId, int team);
+
 // Close the current file, if any.
 void replay_stop();

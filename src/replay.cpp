@@ -9,19 +9,26 @@
 static const int SAMPLE_HZ = 10;
 static const int FLUSH_INTERVAL_MS = 2000;
 // 2: "raw" events carry "size" and exactly the payload, not a fixed 48 bytes.
-static const int FORMAT_VERSION = 2;
+// 3: hit points ("a" records, "maxhp"/"crit" on "o"), chat as displayed
+//    ("chat"), template names on object-creation events, one file per join
+//    instead of closing at map end.
+static const int FORMAT_VERSION = 3;
 
 static FILE* g_file = nullptr;
 static LARGE_INTEGER g_qpcFreq = {};
 static LARGE_INTEGER g_qpcStart = {};
 static double g_lastSampleTime = -1.0;
 static DWORD g_lastFlushTick = 0;
+static bool g_fileHasContent = false;   // anything written after the header
 
 struct ObjectState {
     Pos3 pos;
     Quat rot;
     int occupant;   // player id or -1
     bool seenThisSample;
+    bool hasArmor;
+    float hitPoints;
+    int lastHitPlayer;
 };
 static std::map<uint16_t, ObjectState> g_objects;
 
@@ -143,6 +150,87 @@ static size_t eventSize(int type)
     return size;
 }
 
+// Armor, the component that holds an object's hit points. Layout confirmed in
+// BF1942.exe (vtable 0x008DC7A8) and against the Linux server's symbols, where
+// the same getters sit in the same slots reading the same offsets:
+//     slot  5 getMaxHitPoints    fld [ecx+3Ch]
+//     slot  7 getHitPoints       fld [ecx+38h]
+//     slot 11 getCriticalDamage  fld [ecx+0F0h]
+//     slot 30 getLastHitPlayer   mov eax, [ecx+14h]
+// IObject::queryComponent(IID_IArmor, IID_IArmor) returns it; the client makes
+// that exact call itself at 84 sites.
+static const unsigned int IID_IArmor = 0xc4a4;
+
+struct ArmorFields {
+    float hitPoints;
+    float maxHitPoints;
+    float criticalDamage;   // below this the object burns and loses hit points on its own
+    int lastHitPlayer;      // -1 on the client even for kills: set server-side, not replicated
+};
+
+// True when this vtable's getters read the offsets readArmor reads directly.
+// Checked once per vtable, so an Armor subclass with a different layout is
+// skipped rather than misread.
+static bool armorVtableMatches(uintptr_t vtable)
+{
+    static std::map<uintptr_t, bool> checked;
+    auto it = checked.find(vtable);
+    if (it != checked.end()) return it->second;
+
+    struct Getter {
+        int slot;
+        uint8_t code[7];
+        size_t length;
+    };
+    static const Getter expected[] = {
+        { 5,  { 0xD9, 0x41, 0x3C, 0xC3 }, 4 },
+        { 7,  { 0xD9, 0x41, 0x38, 0xC3 }, 4 },
+        { 11, { 0xD9, 0x81, 0xF0, 0x00, 0x00, 0x00, 0xC3 }, 7 },
+        { 30, { 0x8B, 0x41, 0x14, 0xC3 }, 4 },
+    };
+    bool ok = true;
+    for (auto& getter : expected) {
+        uintptr_t fn = 0;
+        uint8_t code[7];
+        if (safeCopy(&fn, (void*)(vtable + 4 * getter.slot), sizeof(fn)) != sizeof(fn)
+            || safeCopy(code, (void*)fn, getter.length) != getter.length
+            || memcmp(code, getter.code, getter.length) != 0) {
+            ok = false;
+            break;
+        }
+    }
+    checked[vtable] = ok;
+    if (!ok) debuglogt("replay: armor vtable %p has unexpected getters, its hit points are not recorded\n", (void*)vtable);
+    return ok;
+}
+
+static bool readArmor(IObject* obj, ArmorFields& out)
+{
+    void* armor = obj->queryComponent(IID_IArmor, IID_IArmor);
+    if (!armor) return false;
+    uintptr_t vtable = 0;
+    if (safeCopy(&vtable, armor, sizeof(vtable)) != sizeof(vtable) || !armorVtableMatches(vtable)) return false;
+    const uint8_t* base = (const uint8_t*)armor;
+    return safeCopy(&out.hitPoints, base + 0x38, 4) == 4
+        && safeCopy(&out.maxHitPoints, base + 0x3C, 4) == 4
+        && safeCopy(&out.criticalDamage, base + 0xF0, 4) == 4
+        && safeCopy(&out.lastHitPlayer, base + 0x14, 4) == 4;
+}
+
+// Object-creation events (0x07: u32 templateId, u16 networkId, u8, vec3
+// position, vec3 rotation) identify their object only by template id. Name it
+// while the template table is at hand, so objects the client never receives
+// updates for -- anything beyond the ~520 m relevance radius -- are named too.
+static std::string rawEventExtraFields(int type, const uint8_t* payload, size_t size)
+{
+    if (type != 0x07 || size < 12 + sizeof(uint32_t)) return std::string();
+    uint32_t templateId = 0;
+    if (safeCopy(&templateId, payload, sizeof(templateId)) != sizeof(templateId)) return std::string();
+    auto tmpl = ObjectTemplateManager_getTemplate(templateId);
+    if (!tmpl) return std::string();
+    return std::format(",\"tmpl\":\"{}\"", jsonEscape(std::string(tmpl->getName())));
+}
+
 // Rotation of the object's absolute transform as a unit quaternion. Rows a, b, c
 // of Mat4 are taken as the X, Y, Z basis vectors. If the viewer ends up mirrored
 // the fix belongs there, not here: this is what the engine holds.
@@ -199,6 +287,7 @@ static void writeLine(const std::string& line)
     if (!g_file) return;
     fwrite(line.data(), 1, line.size(), g_file);
     fputc('\n', g_file);
+    g_fileHasContent = true;
 
     DWORD tick = GetTickCount();
     if (tick - g_lastFlushTick > FLUSH_INTERVAL_MS) {
@@ -243,6 +332,7 @@ static bool replay_start()
     strftime(iso, sizeof(iso), "%Y-%m-%dT%H:%M:%S", &lt);
     writeLine(std::format("{{\"k\":\"h\",\"v\":{},\"plus\":\"{}\",\"start\":\"{}\",\"hz\":{}}}",
         FORMAT_VERSION, jsonEscape(WideStringToISO88591(get_build_version())), iso, SAMPLE_HZ));
+    g_fileHasContent = false;
 
     debuglogt("replay: recording to %s\n", name);
     BfMenu::getSingleton()->outputConsole(std::string("plus: recording replay to ") + name);
@@ -265,6 +355,11 @@ void replay_stop()
 void replay_onEvent(GameEvent* event)
 {
     if (!g_settings.recordReplays) return;
+    // A join sequence starts a new file; every join recorded so far opens with
+    // event 0x1A. Map end is deliberately not the boundary: the server keeps
+    // sending that map's teardown after GameStatus(ENDMAP), and the client
+    // relaunches between maps anyway, closing the file on its way out.
+    if (g_file && g_fileHasContent && event->getType() == 0x1A) replay_stop();
     if (!g_file && !replay_start()) return;
 
     const double t = replayNow();
@@ -314,7 +409,6 @@ void replay_onEvent(GameEvent* event)
         case BF_GameStatusEvent: {
             auto ev = reinterpret_cast<GameStatusEvent*>(event);
             writeLine(std::format("{{\"k\":\"e\",\"t\":{:.3f},\"e\":\"gameStatus\",\"status\":{}}}", t, (int)ev->newStatus));
-            if (ev->newStatus == GS_ENDMAP) replay_stop();
             break;
         }
         case BF_VoteEvent: {
@@ -350,8 +444,8 @@ void replay_onEvent(GameEvent* event)
             // trailing bytes of that dump may lie past the end of the event.
             size_t size = eventSize(type);
             if (size) {
-                writeLine(std::format("{{\"k\":\"e\",\"t\":{:.3f},\"e\":\"raw\",\"type\":{},\"size\":{},\"raw\":\"{}\"}}",
-                    t, type, size, hexDump(payload, size - 12)));
+                writeLine(std::format("{{\"k\":\"e\",\"t\":{:.3f},\"e\":\"raw\",\"type\":{},\"size\":{}{},\"raw\":\"{}\"}}",
+                    t, type, size, rawEventExtraFields(type, payload, size), hexDump(payload, size - 12)));
             }
             else {
                 writeLine(std::format("{{\"k\":\"e\",\"t\":{:.3f},\"e\":\"raw\",\"type\":{},\"size\":null,\"raw\":\"{}\"}}",
@@ -421,6 +515,11 @@ static void sampleObjects(double t)
     for (auto& kv : g_objects) kv.second.seenThisSample = false;
 
     std::string out;
+    std::string armorOut;
+    auto addArmor = [&armorOut](uint16_t netId, const ArmorFields& armor) {
+        if (!armorOut.empty()) armorOut += ',';
+        armorOut += std::format("[{},{:.1f},{}]", netId, armor.hitPoints, armor.lastHitPlayer);
+    };
     auto& allObjs = ObjectManager_getAllRegisteredObjects();
     for (auto node = allObjs.head->left; node != allObjs.head; node = node->next()) {
         auto obj = node->pair.second;
@@ -435,23 +534,39 @@ static void sampleObjects(double t)
         auto& m = obj->getAbsoluteTransformation();
         Pos3 pos(m.position.x, m.position.y, m.position.z);
         Quat rot = toQuat(m);
+        ArmorFields armor{};
+        const bool hasArmor = readArmor(obj, armor);
 
         auto prev = g_objects.find(netId);
         if (prev == g_objects.end()) {
             auto tmpl = obj->getTemplate();
-            writeLine(std::format("{{\"k\":\"o\",\"t\":{:.3f},\"id\":{},\"gid\":{},\"tmpl\":\"{}\",\"tid\":{},\"team\":{}}}",
+            // Max hit points and the critical-damage threshold are fixed per
+            // object, so they ride on the first-seen record.
+            std::string armorFields = hasArmor
+                ? std::format(",\"maxhp\":{:.1f},\"crit\":{:.1f}", armor.maxHitPoints, armor.criticalDamage)
+                : std::string();
+            writeLine(std::format("{{\"k\":\"o\",\"t\":{:.3f},\"id\":{},\"gid\":{},\"tmpl\":\"{}\",\"tid\":{},\"team\":{}{}}}",
                 t, netId, obj->getID(), tmpl ? jsonEscape(std::string(tmpl->getName())) : std::string(),
-                tmpl ? tmpl->getId() : 0, obj->getTeam()));
-            ObjectState s{ pos, rot, -1, true };
-            g_objects[netId] = s;
+                tmpl ? tmpl->getId() : 0, obj->getTeam(), armorFields));
+            g_objects[netId] = ObjectState{ pos, rot, -1, true, hasArmor, armor.hitPoints, armor.lastHitPlayer };
             if (!out.empty()) out += ',';
             out += std::format("[{},{:.2f},{:.2f},{:.2f},{:.3f},{:.3f},{:.3f},{:.3f}]",
                 netId, pos.x, pos.y, pos.z, rot.x, rot.y, rot.z, rot.w);
+            if (hasArmor) addArmor(netId, armor);
             continue;
         }
 
         auto& s = prev->second;
         s.seenThisSample = true;
+        // Hit points change on every hit, and fall steadily on their own once
+        // below the critical-damage threshold (burning), so this is also the
+        // record of smoke, fire and the moment of destruction.
+        if (hasArmor && (!s.hasArmor || fabsf(armor.hitPoints - s.hitPoints) > 0.05f || armor.lastHitPlayer != s.lastHitPlayer)) {
+            s.hasArmor = true;
+            s.hitPoints = armor.hitPoints;
+            s.lastHitPlayer = armor.lastHitPlayer;
+            addArmor(netId, armor);
+        }
         if (!changed(s.pos, pos, 0.01f) && !changed(s.rot, rot, 0.002f)) continue;
         s.pos = pos;
         s.rot = rot;
@@ -461,6 +576,7 @@ static void sampleObjects(double t)
     }
 
     if (!out.empty()) writeLine(std::format("{{\"k\":\"s\",\"t\":{:.3f},\"o\":[{}]}}", t, out));
+    if (!armorOut.empty()) writeLine(std::format("{{\"k\":\"a\",\"t\":{:.3f},\"a\":[{}]}}", t, armorOut));
 
     // Objects that disappeared since the last sample.
     for (auto it = g_objects.begin(); it != g_objects.end();) {
@@ -487,4 +603,16 @@ void replay_onFrame()
     sampleObjects(t);
     samplePlayers(t);
     sampleControlPoints(t);
+}
+
+// Chat as the client displays it. The server never sends players their own
+// chat back, so ChatFragment events miss everything the recording player says;
+// this catches every line on its way to the chat box instead.
+void replay_onChat(const wchar_t* text, size_t length, int playerId, int team)
+{
+    if (!g_settings.recordReplays || !text) return;
+    if (!g_file && !replay_start()) return;
+    std::string iso = WideStringToISO88591(std::wstring(text, length));
+    writeLine(std::format("{{\"k\":\"chat\",\"t\":{:.3f},\"pid\":{},\"team\":{},\"text\":\"{}\"}}",
+        replayNow(), playerId, team, jsonEscape(iso)));
 }
