@@ -2,6 +2,7 @@
 *vcxproj.user
 Debug
 Release
+build
 src/gitversion.h
 Release*.7z
 *.aps
