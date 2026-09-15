@@ -261,6 +261,8 @@ public:
 
 void* __fastcall GameEvent_allocate(size_t size);
 bool __fastcall GameEvent_registerEventMaker(GameEventID id, GameEventMaker* e);
+// The maker registered for an event id, or nullptr if there is none.
+GameEventMaker* __fastcall GameEvent_getEventMaker(GameEventID id);
 
 template <class T>
 class GameEventMakerMaker : public GameEventMaker {

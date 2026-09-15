@@ -8,7 +8,8 @@
 
 static const int SAMPLE_HZ = 10;
 static const int FLUSH_INTERVAL_MS = 2000;
-static const int FORMAT_VERSION = 1;
+// 2: "raw" events carry "size" and exactly the payload, not a fixed 48 bytes.
+static const int FORMAT_VERSION = 2;
 
 static FILE* g_file = nullptr;
 static LARGE_INTEGER g_qpcFreq = {};
@@ -89,7 +90,8 @@ static size_t safeCopy(void* dst, const void* src, size_t len)
 
 static std::string hexDump(const void* src, size_t len)
 {
-    uint8_t buf[64];
+    // Large enough for the biggest event the engine defines: SetLevel, 158 bytes.
+    uint8_t buf[256];
     if (len > sizeof(buf)) len = sizeof(buf);
     size_t got = safeCopy(buf, src, len);
     std::string out;
@@ -100,6 +102,45 @@ static std::string hexDump(const void* src, size_t len)
         out += hex[buf[i] & 15];
     }
     return out;
+}
+
+// sizeof() of a game event class, read out of the engine's own code rather than
+// guessed. Every GameEventMaker::createEvent in BF1942.exe opens with
+//     mov ecx, sizeof(T)
+//     call GameEvent::allocate
+// -- true of all 51 makers the exe registers, and in agreement with every struct
+// size gameevent.h static_asserts (bfstats features/round-replay-capture/
+// event_sizes.py). Returns 0 when there is no maker or its code has a different
+// shape, e.g. a maker added by another DLL, so the caller never trusts a bad read.
+static size_t eventSize(int type)
+{
+    static const uintptr_t GAMEEVENT_ALLOCATE = 0x004A6290;
+    static int16_t cache[256];
+    static bool cacheReady = false;
+    if (!cacheReady) {
+        std::fill(std::begin(cache), std::end(cache), (int16_t)-1);
+        cacheReady = true;
+    }
+    const bool cacheable = type >= 0 && type < 256;
+    if (cacheable && cache[type] >= 0) return (size_t)cache[type];
+
+    size_t size = 0;
+    if (auto maker = GameEvent_getEventMaker((GameEventID)type)) {
+        uintptr_t vtable = 0, createEvent = 0;
+        uint8_t code[10];
+        if (safeCopy(&vtable, maker, sizeof(vtable)) == sizeof(vtable)
+            && safeCopy(&createEvent, (void*)(vtable + 4), sizeof(createEvent)) == sizeof(createEvent)
+            && safeCopy(code, (void*)createEvent, sizeof(code)) == sizeof(code)
+            && code[0] == 0xB9 && code[5] == 0xE8) {
+            int32_t rel;
+            uint32_t imm;
+            memcpy(&rel, code + 6, sizeof(rel));
+            memcpy(&imm, code + 1, sizeof(imm));
+            if (createEvent + 10 + rel == GAMEEVENT_ALLOCATE && imm >= 12 && imm <= 4096) size = imm;
+        }
+    }
+    if (cacheable) cache[type] = (int16_t)size;
+    return size;
 }
 
 // Rotation of the object's absolute transform as a unit quaternion. Rows a, b, c
@@ -302,12 +343,22 @@ void replay_onEvent(GameEvent* event)
         case BF_UpdateStaticObjectEvent:
             // bf42plus extensions and HUD text, not replay material.
             break;
-        default:
-            // Unknown layout (SetLevel included): dump the first bytes so the
-            // struct can be mapped from a real recording.
-            writeLine(std::format("{{\"k\":\"e\",\"t\":{:.3f},\"e\":\"raw\",\"type\":{},\"raw\":\"{}\"}}",
-                t, type, hexDump(payload, 48)));
+        default: {
+            // Unknown layout (SetLevel included): dump the whole payload so the
+            // struct can be mapped from a real recording. Without a size from the
+            // engine, fall back to a fixed prefix and say so with "size":null --
+            // trailing bytes of that dump may lie past the end of the event.
+            size_t size = eventSize(type);
+            if (size) {
+                writeLine(std::format("{{\"k\":\"e\",\"t\":{:.3f},\"e\":\"raw\",\"type\":{},\"size\":{},\"raw\":\"{}\"}}",
+                    t, type, size, hexDump(payload, size - 12)));
+            }
+            else {
+                writeLine(std::format("{{\"k\":\"e\",\"t\":{:.3f},\"e\":\"raw\",\"type\":{},\"size\":null,\"raw\":\"{}\"}}",
+                    t, type, hexDump(payload, 48)));
+            }
             break;
+        }
     }
 }
 

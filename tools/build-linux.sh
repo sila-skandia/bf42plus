@@ -142,6 +142,17 @@ ls -la "$OUT/dsound.dll"
 if (( INSTALL )); then
     [[ -n "${BF1942_DIR:-}" ]] || { echo "error: --install needs BF1942_DIR" >&2; exit 1; }
     [[ -d "$BF1942_DIR" ]] || { echo "error: BF1942_DIR does not exist: $BF1942_DIR" >&2; exit 1; }
+    # The rolling dsound_old.dll below would, on a second install, overwrite the
+    # only copy of the release DLL the first install displaced. So the first
+    # non-development DLL seen (anything whose version is not the 99.x this
+    # script stamps) is also kept as dsound_release.dll, which nothing overwrites.
+    for f in dsound.dll dsound_old.dll; do
+        if [[ -f "$BF1942_DIR/$f" && ! -f "$BF1942_DIR/dsound_release.dll" ]] \
+            && ! grep -aq '_build_version_=99\.' "$BF1942_DIR/$f"; then
+            cp -p "$BF1942_DIR/$f" "$BF1942_DIR/dsound_release.dll"
+            echo "==> kept release DLL as dsound_release.dll ($f)"
+        fi
+    done
     # Keep one generation back, the way tools/copyoutput.bat does.
     [[ -f "$BF1942_DIR/dsound.dll" ]] && mv -f "$BF1942_DIR/dsound.dll" "$BF1942_DIR/dsound_old.dll"
     cp -f "$OUT/dsound.dll" "$OUT/dsound.pdb" "$BF1942_DIR/"

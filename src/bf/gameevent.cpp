@@ -43,6 +43,12 @@ __declspec(naked) bool __fastcall GameEvent_registerEventMaker(GameEventID id, G
     _asm mov eax, 0x004A7D70
     _asm jmp eax
 }
+
+__declspec(naked) GameEventMaker* __fastcall GameEvent_getEventMaker(GameEventID id)
+{
+    _asm mov eax, 0x004A7BD0
+    _asm jmp eax
+}
 #pragma warning(pop)
 
 void GameEvent::operator delete(void* ptr)
