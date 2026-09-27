@@ -14,7 +14,9 @@ class GameEvent;
 // Called from GameEventManager::getNextRcvdEvent_hook for every received event,
 // before the event is handled (so events the DLL swallows are still logged).
 // Also called with recording off: the join's own events (the server, the
-// level, the rules) are kept, so a file begun mid-round still names them.
+// level, the rules) are kept, and the players, every object made since that
+// still stands, the projectile pools and each player's kit, so a file begun
+// mid-round still names them.
 void replay_onEvent(GameEvent* event);
 
 // Called once per rendered frame while in-game. Throttles itself to the sample rate.

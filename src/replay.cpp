@@ -45,7 +45,11 @@ static const int FLUSH_INTERVAL_MS = 2000;
 //    5 (a reader that does not know it skips it): "tk", the two sides'
 //    tickets whenever they change; and for a file that begins after the join
 //    (recording switched on mid-round), the join's own events at its head,
-//    each with "ago", the seconds before the file began that it arrived, and
+//    then each player's latest "createPlayer" (the soldier and kit he had at
+//    the join), every object made before the file and not destroyed since
+//    ("createObject", in the order they came), the projectile pools still
+//    standing ("projPool") and each player's latest kit ("pickupKit"), each
+//    with "ago", the seconds before the file began that it arrived, and
 //    "roster", who was playing when it began.
 static const int FORMAT_VERSION = 5;
 
@@ -128,6 +132,30 @@ struct HeldEvent {
     std::string line;   // the record as written, at t 0
 };
 static std::vector<HeldEvent> g_heldJoin;
+
+// The objects the join made, and every one since, held the same way and let
+// go with the join's events. CreateObject (0x07) comes once for every object,
+// the join's database sending every one that stands, but the sampler names
+// only what the server replicates, within the view distance: a file begun
+// after the join would know a carrier across the map only as the root id of
+// its turrets and engines. Held: each object's createObject until a
+// DestroyObject (0x06) for its id; each projectile pool (0x05) until one for
+// its first id (a pool goes all at once); and each player's latest pickupKit
+// (0x23) until that kit is destroyed or he leaves (0x0C), a player id passing
+// to whoever joins next. And each player's latest createPlayer (0x08) until
+// he leaves: the join's database gives a player already spawned his soldier
+// and his kit there (vehNetId, kitNetId), and sends no pickupKit for him.
+struct HeldRecord {
+    uint32_t order;     // arrival, across all four
+    DWORD tick;         // GetTickCount() when it arrived
+    uint16_t netId;     // the object, the pool's first id, the kit, or the player's own
+    std::string line;   // the record as written, at t 0
+};
+static std::map<int, HeldRecord> g_heldPlayers;        // by player id
+static std::map<uint16_t, HeldRecord> g_heldCreates;   // by network id
+static std::map<uint16_t, HeldRecord> g_heldPools;     // by first network id
+static std::map<int, HeldRecord> g_heldKits;           // by player id
+static uint32_t g_heldOrder = 0;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -585,6 +613,26 @@ static void writeRoster(double t)
     if (!out.empty()) writeLine(std::format("{{\"k\":\"roster\",\"t\":{:.3f},\"p\":[{}]}}", t, out));
 }
 
+// A held record written into the file with "ago", the seconds before `now`
+// that it arrived.
+static void writeHeld(const std::string& line, DWORD tick, DWORD now)
+{
+    std::string out = line;
+    out.insert(out.size() - 1, std::format(",\"ago\":{:.3f}", (now - tick) / 1000.0));
+    writeLine(out);
+}
+
+// Held records in the order they arrived.
+template <class Key>
+static void writeHeldInOrder(const std::map<Key, HeldRecord>& held, DWORD now)
+{
+    std::vector<const HeldRecord*> ordered;
+    ordered.reserve(held.size());
+    for (const auto& kv : held) ordered.push_back(&kv.second);
+    std::sort(ordered.begin(), ordered.end(), [](const HeldRecord* a, const HeldRecord* b) { return a->order < b->order; });
+    for (const HeldRecord* record : ordered) writeHeld(record->line, record->tick, now);
+}
+
 static bool replay_start()
 {
     if (g_file) return true;
@@ -629,18 +677,21 @@ static bool replay_start()
     debuglogt("replay: recording to %s\n", name);
     BfMenu::getSingleton()->outputConsole(std::string("plus: recording replay to ") + name);
 
-    // A file that begins after the join opens with what the join said and
-    // with who is playing. One that begins with the join holds nothing yet
-    // (its 0x1A let the last join's go) and records the join as it comes.
-    if (!g_heldJoin.empty()) {
+    // A file that begins after the join opens with what the join said, the
+    // players, the objects standing, their projectile pools and the players'
+    // kits, and who is playing. One that begins with the join holds nothing
+    // yet (its 0x1A let the last join's go) and records the join as it comes.
+    if (!g_heldJoin.empty() || !g_heldPlayers.empty() || !g_heldCreates.empty() || !g_heldPools.empty()
+        || !g_heldKits.empty()) {
         const DWORD now = GetTickCount();
-        for (const auto& held : g_heldJoin) {
-            std::string line = held.line;
-            line.insert(line.size() - 1, std::format(",\"ago\":{:.3f}", (now - held.tick) / 1000.0));
-            writeLine(line);
-        }
+        for (const auto& held : g_heldJoin) writeHeld(held.line, held.tick, now);
+        writeHeldInOrder(g_heldPlayers, now);
+        writeHeldInOrder(g_heldCreates, now);
+        writeHeldInOrder(g_heldPools, now);
+        writeHeldInOrder(g_heldKits, now);
         writeRoster(replayNow());
-        debuglogt("replay: began after the join: %zu of its events and the roster written\n", g_heldJoin.size());
+        debuglogt("replay: began after the join: %zu of its events, %zu players, %zu objects, %zu pools, %zu kits and the roster written\n",
+            g_heldJoin.size(), g_heldPlayers.size(), g_heldCreates.size(), g_heldPools.size(), g_heldKits.size());
     }
     return true;
 }
@@ -665,6 +716,32 @@ static std::string setLevelLine(GameEvent* event, double t)
     size_t modeLen = strnlen(ev->gameModeFile, sizeof(ev->gameModeFile));
     return std::format("{{\"k\":\"e\",\"t\":{:.3f},\"e\":\"setLevel\",\"level\":\"{}\",\"mode\":\"{}\"}}",
         t, jsonEscape(ev->levelPath, lvlLen), jsonEscape(ev->gameModeFile, modeLen));
+}
+
+// The template is looked up under SEH: this runs for every object whether or
+// not recording is on (holdObjectEvent).
+static std::string createObjectLine(GameEvent* event, double t)
+{
+    auto ev = reinterpret_cast<CreateObjectEvent*>(event);
+    auto tmpl = templateById(ev->templateId);
+    std::string tmplName = tmpl ? jsonEscape(std::string(tmpl->getName())) : std::string();
+    return std::format("{{\"k\":\"e\",\"t\":{:.3f},\"e\":\"createObject\",\"tid\":{},\"netId\":{},\"tmpl\":\"{}\",\"pos\":[{:.2f},{:.2f},{:.2f}],\"rot\":[{:.2f},{:.2f},{:.2f}]}}",
+        t, ev->templateId, ev->objectNetId, tmplName, ev->position.x, ev->position.y, ev->position.z, ev->rotation.x, ev->rotation.y, ev->rotation.z);
+}
+
+static std::string pickupKitLine(GameEvent* event, double t)
+{
+    auto ev = reinterpret_cast<PickupKitEvent*>(event);
+    return std::format("{{\"k\":\"e\",\"t\":{:.3f},\"e\":\"pickupKit\",\"pid\":{},\"netId\":{}}}", t, ev->playerID, ev->kitNetId);
+}
+
+static std::string createPlayerLine(GameEvent* event, double t)
+{
+    auto ev = reinterpret_cast<CreatePlayerEvent*>(event);
+    size_t nameLen = strnlen(ev->name, sizeof(ev->name));
+    return std::format("{{\"k\":\"e\",\"t\":{:.3f},\"e\":\"createPlayer\",\"pid\":{},\"name\":\"{}\",\"team\":{},\"ai\":{},\"netId\":{},\"vehNetId\":{},\"camNetId\":{},\"kitNetId\":{}}}",
+        t, ev->playerID, jsonEscape(ev->name, nameLen), ev->team, ev->isAI ? 1 : 0,
+        ev->playerNetworkID, ev->vehicleNetworkID, ev->cameraNetworkID, ev->kitNetworkID);
 }
 
 // Keep the join's events a file that begins after them opens with
@@ -700,15 +777,73 @@ static void holdJoinEvent(GameEvent* event)
     g_heldJoin.push_back(held);
 }
 
+// Keep the players, the objects standing, their pools and the players' kits
+// for a file that begins after them (g_heldPlayers, g_heldCreates,
+// g_heldPools, g_heldKits). A record for an id already held replaces it and
+// takes its new place in the order.
+static void holdObjectEvent(GameEvent* event)
+{
+    const int type = event->getType();
+    const uint8_t* payload = (const uint8_t*)event + 12;
+    switch (type) {
+        case BF_CreatePlayerEvent: {
+            auto ev = reinterpret_cast<CreatePlayerEvent*>(event);
+            g_heldPlayers[ev->playerID] = HeldRecord{ g_heldOrder++, GetTickCount(), ev->playerNetworkID, createPlayerLine(event, 0.0) };
+            break;
+        }
+        case BF_CreateObjectEvent: {
+            const uint16_t id = reinterpret_cast<CreateObjectEvent*>(event)->objectNetId;
+            g_heldCreates[id] = HeldRecord{ g_heldOrder++, GetTickCount(), id, createObjectLine(event, 0.0) };
+            break;
+        }
+        case 0x05: {  // CreateMultipleObjectsEvent: a kit's projectile pool
+            const size_t size = eventSize(type);
+            std::string line = size ? decodeEvent(type, payload, size, 0.0) : std::string();
+            if (line.empty()) break;
+            const uint16_t first = payloadAt<uint16_t>(payload, 4);
+            g_heldPools[first] = HeldRecord{ g_heldOrder++, GetTickCount(), first, std::move(line) };
+            break;
+        }
+        case BF_PickupKitEvent: {
+            auto ev = reinterpret_cast<PickupKitEvent*>(event);
+            g_heldKits[ev->playerID] = HeldRecord{ g_heldOrder++, GetTickCount(), ev->kitNetId, pickupKitLine(event, 0.0) };
+            break;
+        }
+        case BF_DestroyObjectEvent: {
+            const uint16_t id = reinterpret_cast<DestroyObjectEvent*>(event)->objectNetId;
+            g_heldCreates.erase(id);
+            g_heldPools.erase(id);
+            std::erase_if(g_heldKits, [id](const auto& kv) { return kv.second.netId == id; });
+            break;
+        }
+        case BF_DestroyPlayerEvent: {
+            const int pid = reinterpret_cast<DestroyPlayerEvent*>(event)->playerid;
+            g_heldPlayers.erase(pid);
+            g_heldKits.erase(pid);
+            break;
+        }
+        default:
+            break;
+    }
+}
+
 static void recordEvent(GameEvent* event);
 
 void replay_onEvent(GameEvent* event)
 {
-    // A new join: what the last one said no longer holds. Let go first, so a
-    // file this event starts does not open with the last server's level.
-    if (event->getType() == 0x1A) g_heldJoin.clear();
+    // A new join: what the last one said, and what it made, no longer hold.
+    // Let go first, so a file this event starts does not open with the last
+    // server's level, players or objects.
+    if (event->getType() == 0x1A) {
+        g_heldJoin.clear();
+        g_heldPlayers.clear();
+        g_heldCreates.clear();
+        g_heldPools.clear();
+        g_heldKits.clear();
+    }
     recordEvent(event);
     holdJoinEvent(event);
+    holdObjectEvent(event);
 }
 
 static void recordEvent(GameEvent* event)
@@ -727,14 +862,9 @@ static void recordEvent(GameEvent* event)
     const uint8_t* payload = (const uint8_t*)event + 12;
 
     switch (type) {
-        case BF_CreatePlayerEvent: {
-            auto ev = reinterpret_cast<CreatePlayerEvent*>(event);
-            size_t nameLen = strnlen(ev->name, sizeof(ev->name));
-            writeLine(std::format("{{\"k\":\"e\",\"t\":{:.3f},\"e\":\"createPlayer\",\"pid\":{},\"name\":\"{}\",\"team\":{},\"ai\":{},\"netId\":{},\"vehNetId\":{},\"camNetId\":{},\"kitNetId\":{}}}",
-                t, ev->playerID, jsonEscape(ev->name, nameLen), ev->team, ev->isAI ? 1 : 0,
-                ev->playerNetworkID, ev->vehicleNetworkID, ev->cameraNetworkID, ev->kitNetworkID));
+        case BF_CreatePlayerEvent:
+            writeLine(createPlayerLine(event, t));
             break;
-        }
         case BF_DestroyPlayerEvent: {
             auto ev = reinterpret_cast<DestroyPlayerEvent*>(event);
             writeLine(std::format("{{\"k\":\"e\",\"t\":{:.3f},\"e\":\"destroyPlayer\",\"pid\":{}}}", t, ev->playerid));
@@ -818,19 +948,12 @@ static void recordEvent(GameEvent* event)
             }
             break;
         }
-        case BF_PickupKitEvent: {
-            auto ev = reinterpret_cast<PickupKitEvent*>(event);
-            writeLine(std::format("{{\"k\":\"e\",\"t\":{:.3f},\"e\":\"pickupKit\",\"pid\":{},\"netId\":{}}}", t, ev->playerID, ev->kitNetId));
+        case BF_PickupKitEvent:
+            writeLine(pickupKitLine(event, t));
             break;
-        }
-        case BF_CreateObjectEvent: {
-            auto ev = reinterpret_cast<CreateObjectEvent*>(event);
-            auto tmpl = ObjectTemplateManager_getTemplate(ev->templateId);
-            std::string tmplName = tmpl ? jsonEscape(std::string(tmpl->getName())) : std::string();
-            writeLine(std::format("{{\"k\":\"e\",\"t\":{:.3f},\"e\":\"createObject\",\"tid\":{},\"netId\":{},\"tmpl\":\"{}\",\"pos\":[{:.2f},{:.2f},{:.2f}],\"rot\":[{:.2f},{:.2f},{:.2f}]}}",
-                t, ev->templateId, ev->objectNetId, tmplName, ev->position.x, ev->position.y, ev->position.z, ev->rotation.x, ev->rotation.y, ev->rotation.z));
+        case BF_CreateObjectEvent:
+            writeLine(createObjectLine(event, t));
             break;
-        }
         case BF_SetLevelEvent:
             writeLine(setLevelLine(event, t));
             break;
