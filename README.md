@@ -81,7 +81,7 @@ These features are disabled by default. Edit `bf42++.ini` in the game directory 
 - Reduce CPU load if you're using framerate lock. The vanilla game doesn't yield CPU time to operating system regardless of your framerate and always melts your CPU (and more importantly on laptops, drains the battery)
 - bf42++ offers experimental feature which allows using unpacked game archives in BF1942.exe the same way BF1942_r.exe does
 - bf42++ has bf42++_r variant for hooking BF1942_r debug binary (works the same way but supports only the second installation option). It has most of original features disabled, but it adds Tracy profiler integration so it's possible to profile which operations take most frame or map load time in the game
-- Record a round replay to `replays/` (option `recordReplays`, or `plus.recordReplays 1` in the console). Writes every game event the server sends plus a 10 Hz sample of every networked object to `replays/replay_<timestamp>.ndjson`, one file per join
+- Record a round replay to `replays/` (option `recordReplays`, or `plus.recordReplays 1` in the console). Writes every game event the server sends plus a 10 Hz sample of every networked object to `replays/replay_<timestamp>.ndjson`, one file per join. Switched on mid-round, the file still opens with the level, the server and who is playing
 
 ### Details about `plus.smootherGameplay` option
 In version `1.3.4`, a new option was added that may make the game run smoother and reduce the time between you pressing a key and the server processing it. The impact of this is far less than the server-side "reg patch", but it may improve your game experience a bit. It is also possible that it won't have any effect on your game.

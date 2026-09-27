@@ -18,6 +18,7 @@
 #include <format>
 #include <map>
 #include <string>
+#include <vector>
 
 // ---------------------------------------------------------------------------
 // State
@@ -42,7 +43,10 @@ static const int FLUSH_INTERVAL_MS = 2000;
 //    v4 files keyed them all 0). "jn" adds the part's position in its root's
 //    frame, which tells a hull's identically named guns apart. Added within
 //    5 (a reader that does not know it skips it): "tk", the two sides'
-//    tickets whenever they change.
+//    tickets whenever they change; and for a file that begins after the join
+//    (recording switched on mid-round), the join's own events at its head,
+//    each with "ago", the seconds before the file began that it arrived, and
+//    "roster", who was playing when it began.
 static const int FORMAT_VERSION = 5;
 
 static FILE* g_file = nullptr;
@@ -110,6 +114,20 @@ static std::map<uint16_t, SoldierState> g_soldiers;
 static bool g_animStatesWritten = false;
 // The two sides' tickets as last written (-1: nothing yet).
 static int g_tickets[2] = { -1, -1 };
+
+// What the last join said, for a file that begins after it. Recording can be
+// switched on at any time (plus.recordReplays 1), and a file that begins
+// mid-round has missed the join: the server, its mod, the level and its game
+// type, the rules, and every player's createPlayer, which is where names come
+// from. The join's events are kept as they pass whether or not a file is open,
+// and a file that begins after them opens with them and with who is playing
+// (replay_start). A new join (0x1A) lets the last one's go.
+struct HeldEvent {
+    int type;
+    DWORD tick;         // GetTickCount() when it arrived
+    std::string line;   // the record as written, at t 0
+};
+static std::vector<HeldEvent> g_heldJoin;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -548,6 +566,25 @@ static void writeLine(const std::string& line)
 // File lifecycle
 // ---------------------------------------------------------------------------
 
+// Who is playing, as `[pid, team, ai, name, local]` (local 1 for the recording
+// player): for a file that begins after the join, whose players' createPlayer
+// events all went by before it.
+static void writeRoster(double t)
+{
+    auto players = BFPlayer::getPlayers();
+    if (!players) return;
+    const BFPlayer* local = BFPlayer::getLocal();
+    std::string out;
+    for (auto it = players->begin(); it != players->end(); ++it) {
+        BFPlayer* player = *it;
+        if (!player) continue;
+        if (!out.empty()) out += ',';
+        out += std::format("[{},{},{},\"{}\",{}]", player->getId(), player->getTeam(),
+            player->getIsAIPlayer() ? 1 : 0, jsonEscape(std::string(player->getName())), player == local ? 1 : 0);
+    }
+    if (!out.empty()) writeLine(std::format("{{\"k\":\"roster\",\"t\":{:.3f},\"p\":[{}]}}", t, out));
+}
+
 static bool replay_start()
 {
     if (g_file) return true;
@@ -591,6 +628,20 @@ static bool replay_start()
 
     debuglogt("replay: recording to %s\n", name);
     BfMenu::getSingleton()->outputConsole(std::string("plus: recording replay to ") + name);
+
+    // A file that begins after the join opens with what the join said and
+    // with who is playing. One that begins with the join holds nothing yet
+    // (its 0x1A let the last join's go) and records the join as it comes.
+    if (!g_heldJoin.empty()) {
+        const DWORD now = GetTickCount();
+        for (const auto& held : g_heldJoin) {
+            std::string line = held.line;
+            line.insert(line.size() - 1, std::format(",\"ago\":{:.3f}", (now - held.tick) / 1000.0));
+            writeLine(line);
+        }
+        writeRoster(replayNow());
+        debuglogt("replay: began after the join: %zu of its events and the roster written\n", g_heldJoin.size());
+    }
     return true;
 }
 
@@ -607,7 +658,60 @@ void replay_stop()
 // Events
 // ---------------------------------------------------------------------------
 
+static std::string setLevelLine(GameEvent* event, double t)
+{
+    auto ev = reinterpret_cast<SetLevelEvent*>(event);
+    size_t lvlLen = strnlen(ev->levelPath, sizeof(ev->levelPath));
+    size_t modeLen = strnlen(ev->gameModeFile, sizeof(ev->gameModeFile));
+    return std::format("{{\"k\":\"e\",\"t\":{:.3f},\"e\":\"setLevel\",\"level\":\"{}\",\"mode\":\"{}\"}}",
+        t, jsonEscape(ev->levelPath, lvlLen), jsonEscape(ev->gameModeFile, modeLen));
+}
+
+// Keep the join's events a file that begins after them opens with
+// (g_heldJoin), the latest of each kind. Not the world clock (0x04): its time
+// is the join's, and moved to the file's start it would be wrong.
+static void holdJoinEvent(GameEvent* event)
+{
+    const int type = event->getType();
+    std::string line;
+    switch (type) {
+        case BF_SetLevelEvent:
+            line = setLevelLine(event, 0.0);
+            break;
+        case 0x14:  // ChallengeEvent: the mod and pack the server runs
+        case 0x16:  // GameRulesEvent
+        case 0x1A:  // ServerInfoEvent: the server's mod
+        case 0x1B: {  // ServerInfoEvent2: the server's name
+            const size_t size = eventSize(type);
+            if (size) line = decodeEvent(type, (const uint8_t*)event + 12, size, 0.0);
+            break;
+        }
+        default:
+            return;
+    }
+    if (line.empty()) return;
+    const HeldEvent held{ type, GetTickCount(), line };
+    for (auto& h : g_heldJoin) {
+        if (h.type == type) {
+            h = held;
+            return;
+        }
+    }
+    g_heldJoin.push_back(held);
+}
+
+static void recordEvent(GameEvent* event);
+
 void replay_onEvent(GameEvent* event)
+{
+    // A new join: what the last one said no longer holds. Let go first, so a
+    // file this event starts does not open with the last server's level.
+    if (event->getType() == 0x1A) g_heldJoin.clear();
+    recordEvent(event);
+    holdJoinEvent(event);
+}
+
+static void recordEvent(GameEvent* event)
 {
     if (!g_settings.recordReplays) return;
     // A join sequence starts a new file; every join recorded so far opens with
@@ -727,14 +831,9 @@ void replay_onEvent(GameEvent* event)
                 t, ev->templateId, ev->objectNetId, tmplName, ev->position.x, ev->position.y, ev->position.z, ev->rotation.x, ev->rotation.y, ev->rotation.z));
             break;
         }
-        case BF_SetLevelEvent: {
-            auto ev = reinterpret_cast<SetLevelEvent*>(event);
-            size_t lvlLen = strnlen(ev->levelPath, sizeof(ev->levelPath));
-            size_t modeLen = strnlen(ev->gameModeFile, sizeof(ev->gameModeFile));
-            writeLine(std::format("{{\"k\":\"e\",\"t\":{:.3f},\"e\":\"setLevel\",\"level\":\"{}\",\"mode\":\"{}\"}}",
-                t, jsonEscape(ev->levelPath, lvlLen), jsonEscape(ev->gameModeFile, modeLen)));
+        case BF_SetLevelEvent:
+            writeLine(setLevelLine(event, t));
             break;
-        }
         case BF_HUDTextEvent:
         case BF_CreateStaticObjectEvent:
         case BF_UpdateStaticObjectEvent:

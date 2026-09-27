@@ -260,7 +260,8 @@ public:
         L"; Records every game event the server sends, plus a 10 Hz sample of every\n"
         L"; networked object, to replays/replay_<timestamp>.ndjson while connected to\n"
         L"; a server. A new file is started on each join.\n"
-        L"; Can also be toggled in-game with plus.recordReplays 1/0.",
+        L"; Can also be toggled in-game with plus.recordReplays 1/0; a file begun\n"
+        L"; mid-round still names the level, the server and who is playing.",
         0, false };
 };
 
