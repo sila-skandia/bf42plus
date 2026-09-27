@@ -178,6 +178,7 @@ Settings::Settings()
 #if defined(TRACY_ENABLE)
         &profilerAutoStart,
 #endif
+        &recordReplays,
     };
 }
 

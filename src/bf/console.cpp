@@ -1,6 +1,7 @@
 #include "console.h"
 #include "../settings.h"
 #include "../hooks.h" // patchBytes(), used by the _DEBUG only plus.crash command
+#include "../replay.h"
 
 #include <format>
 #include <sstream>
@@ -840,6 +841,29 @@ public:
     };
 };
 ConsoleObjectPlusMaxBusyWaitTime commandPlusMaxBusyWaitTime;
+
+class ConsoleObjectPlusRecordReplays : public ConsoleObjectBoolSetting {
+public:
+    ConsoleObjectPlusRecordReplays() : ConsoleObjectBoolSetting() {
+        functionname = "recordReplays";
+    };
+    virtual void* executeObjectMethod() {
+        if (argcount == 0) {
+            result = g_settings.recordReplays.value;
+            hasreturnvalue = true;
+            return &result;
+        }
+        else if (argcount == 1) {
+            g_settings.recordReplays.value = args[0] != 0;
+            g_settings.recordReplays.dirty = true;
+            g_settings.save(false);
+            if (!g_settings.recordReplays.value) replay_stop();
+            hasreturnvalue = false;
+        }
+        return 0;
+    };
+};
+ConsoleObjectPlusRecordReplays commandPlusRecordReplays;
 
 
 void register_custom_console_commands()

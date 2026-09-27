@@ -4,6 +4,7 @@
 #include "../debug.h"
 #include "../hooks.h"
 #include "../settings.h"
+#include "../replay.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
@@ -316,6 +317,8 @@ void hook_Renderer_draw_1()
 
     auto localPlayer = BFPlayer::getLocal();
     Pos3 playerPos = localPlayer->getVehicle()->getAbsolutePosition();
+
+    replay_onFrame();
 
     if (g_settings.enable3DMineMap && g_serverSettings.mine3DMap.allow) {
         auto& projectiles = ObjectManager_getProjectileMap();

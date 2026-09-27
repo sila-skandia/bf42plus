@@ -9,6 +9,7 @@
 #include "settings.h"
 #include "profiling.h"
 #include "bf/console.h"
+#include "replay.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define _CRT_SECURE_NO_WARNINGS
@@ -103,7 +104,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
             break;
         case DLL_THREAD_ATTACH:
         case DLL_THREAD_DETACH:
+            break;
         case DLL_PROCESS_DETACH:
+            // The client exits and relaunches on every map change; close the
+            // replay there so its tail is flushed and it ends with an "end" record.
+            replay_stop();
             break;
     }
     return TRUE;

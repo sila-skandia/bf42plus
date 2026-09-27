@@ -34,6 +34,7 @@ target_sources( ${TARGET} PRIVATE
   src/debug.cpp
   src/dllmain.cpp
   src/hooks.c
+  src/replay.cpp
   src/settings.cpp
   src/util.cpp
 

@@ -8,6 +8,7 @@
 #include "../hooks.h"
 #include "../bfhook.h"
 #include "../settings.h"
+#include "../replay.h"
 
 
 static int currentMessagePlayerID = -1;
@@ -53,6 +54,12 @@ __declspec(naked) bool __fastcall GameEvent_registerEventMaker(GameEventID id, G
     _asm mov eax, 0x004A7D70
     _asm jmp eax
 }
+
+__declspec(naked) GameEventMaker* __fastcall GameEvent_getEventMaker(GameEventID id)
+{
+    _asm mov eax, 0x004A7BD0
+    _asm jmp eax
+}
 #pragma warning(pop)
 
 void GameEvent::operator delete(void* ptr)
@@ -69,6 +76,8 @@ GameEvent* GameEventManager::getNextRcvdEvent_hook()
 
     GameEvent* event = getNextRcvdEvent();
     if (!event) return 0;
+
+    replay_onEvent(event);
 
 
     switch (event->getType()) {

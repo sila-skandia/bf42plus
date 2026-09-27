@@ -40,3 +40,6 @@ Release*.7z
 *.exe
 *.out
 *.app
+
+# CMake / local build output
+/build/

@@ -15,6 +15,7 @@
 #include <string>
 #include <cstring>
 #include <sstream>
+#include "replay.h"
 
 
 #pragma warning(disable: 4740)
@@ -1014,6 +1015,7 @@ void bfhook_init()
     ui_hook_init();
     renderer_hook_init();
     skinning_hook_init();
+    replay_hook_init();
 
     patch_install_bf_debug_callback_handler();
 

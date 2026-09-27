@@ -5,12 +5,18 @@
 
 enum GameEventID {
     BF_HUDTextEvent = 0x01,
+    BF_DestroyObjectEvent = 0x06,
+    BF_CreateObjectEvent = 0x07,
     BF_CreatePlayerEvent = 0x08,
+    BF_PlayerControlObjectEvent = 0x09,
+    BF_EnterVehicleEvent = 0x0A,
+    BF_ExitVehicleEvent = 0x0B,
     BF_DestroyPlayerEvent = 0x0C,
     BF_VoteEvent = 0x12,
     BF_WelcomeMsgEvent = 0x17,
     BF_CreateStaticObjectEvent = 0x1C,
     BF_UpdateStaticObjectEvent = 0x1D,
+    BF_PickupKitEvent = 0x23,
     BF_GameStatusEvent = 0x24,
     BF_SpecialGameEvent = 0x27,
     BF_ChatFragmentEvent = 0x28,
@@ -157,6 +163,62 @@ public:
 
 static_assert(sizeof(SetTeamEvent) == 0x0E);
 
+class DestroyObjectEvent : GameEvent {
+public:
+    uint16_t objectNetId;
+};
+
+static_assert(sizeof(DestroyObjectEvent) == 0x0E);
+
+class PlayerControlObjectEvent : GameEvent {
+public:
+    uint8_t playerID;
+    uint16_t objectNetId;
+};
+
+static_assert(sizeof(PlayerControlObjectEvent) == 15);
+
+class EnterVehicleEvent : GameEvent {
+public:
+    uint8_t playerID;
+    uint16_t vehicleNetId;
+};
+
+static_assert(sizeof(EnterVehicleEvent) == 15);
+
+class ExitVehicleEvent : GameEvent {
+public:
+    uint8_t playerID;
+    uint8_t flag;
+};
+
+static_assert(sizeof(ExitVehicleEvent) == 14);
+
+class PickupKitEvent : GameEvent {
+public:
+    uint8_t playerID;
+    uint16_t kitNetId;
+};
+
+static_assert(sizeof(PickupKitEvent) == 15);
+
+class CreateObjectEvent : GameEvent {
+public:
+    uint32_t templateId;
+    uint16_t objectNetId;
+    uint8_t flag;
+    Pos3 position;
+    Vec3 rotation;
+};
+
+static_assert(sizeof(CreateObjectEvent) == 43);
+
+class SetLevelEvent : GameEvent {
+public:
+    char levelPath[64];
+    char gameModeFile[64];
+};
+
 class VoteEvent : GameEvent {
 public:
     uint8_t target; // player ID or maplist index
@@ -262,6 +324,8 @@ public:
 
 void* __fastcall GameEvent_allocate(size_t size);
 bool __fastcall GameEvent_registerEventMaker(GameEventID id, GameEventMaker* e);
+// The maker registered for an event id, or nullptr if there is none.
+GameEventMaker* __fastcall GameEvent_getEventMaker(GameEventID id);
 
 template <class T>
 class GameEventMakerMaker : public GameEventMaker {

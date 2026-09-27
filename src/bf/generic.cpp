@@ -4,6 +4,8 @@
 
 #include "../debug.h"
 #include "../hooks.h"
+
+#include "../replay.h"
 #include "../settings.h"
 
 #include "../blake2b/blake2.h"
@@ -114,6 +116,17 @@ __declspec(naked) bool __stdcall getStringFromRegistry(const char* key, const ch
 
 void Game::addPlayerInput_hook(int playerid, PlayerInput* input)
 {
+    // Check for weapon fire actions (input channel 8 = Fire, 23 = AltFire)
+    static bool s_wasFiring[256] = { false };
+    if (playerid >= 0 && playerid < 256 && input) {
+        bool firePrimary = input->controls[8] > 0.1f;
+        bool fireSecondary = input->controls[23] > 0.1f;
+        bool isFiringNow = firePrimary || fireSecondary;
+        if (isFiringNow && !s_wasFiring[playerid]) {
+            replay_onFire(playerid, firePrimary, fireSecondary);
+        }
+        s_wasFiring[playerid] = isFiringNow;
+    }
     // input can be modified here, the object will not be used after this function returns
 
     // Restore the keyboard/joystick flight axes that the engine's freelook
