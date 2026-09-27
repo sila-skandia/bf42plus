@@ -7,6 +7,10 @@ on:
 
   pull_request:
 
+  # Publishing a release from the GitHub UI builds it and attaches the assets.
+  release:
+    types: [published]
+
 jobs:
   build-msvc:
     runs-on: windows-latest
@@ -68,6 +72,15 @@ jobs:
         copy ${{ steps.strings.outputs.build-output-dir }}\${{ matrix.build_type }}\*.dll ${{ steps.strings.outputs.build-output-dir }}
         copy ${{ steps.strings.outputs.build-output-dir }}\BlackScreen\${{ matrix.build_type }}\*.exe ${{ steps.strings.outputs.build-output-dir }}
 
+    # The DLL exports DirectSoundCreate8 and forwards to the real library, so
+    # under the name dsound.dll the game loads it unaided -- it is the same
+    # binary as bf42++.dll, which bf42++.exe injects instead. Shipping both
+    # names means nobody has to rename anything by hand. Not done for the
+    # bf1942_r build, which only supports the loader.
+    - name: Copy the DLL under its dsound.dll name
+      if: matrix.target_bf1942_r == 'OFF'
+      run: copy ${{ steps.strings.outputs.build-output-dir }}\bf42++.dll ${{ steps.strings.outputs.build-output-dir }}\dsound.dll
+
     - name: Upload Build Artifact
       uses: actions/upload-artifact@v4
       with:
@@ -78,3 +91,35 @@ jobs:
         if-no-files-found: error
         compression-level: 9
 
+
+  # Attaches the build output to a release when one is published. Actions
+  # artifacts are no good for this on their own: downloading one requires being
+  # signed in to GitHub, and they expire. Release assets are public and permanent.
+  attach-release-assets:
+    if: github.event_name == 'release'
+    needs: build-msvc
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+    - name: Download the build
+      uses: actions/download-artifact@v4
+      with:
+        name: windows-msvc-x86
+        path: dist
+
+    # Two assets, one build. bf42++.zip is the loader install (all three files);
+    # dsound.dll is the same DLL again, standalone, for the drop-in install. It is
+    # left out of the zip so the download is not the same binary twice.
+    - name: Package
+      run: |
+        cd dist
+        zip -9 ../bf42++.zip bf42++.dll bf42++.exe bf42++BlackScreen.exe
+        cp dsound.dll ../dsound.dll
+
+    - name: Attach assets to the release
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: gh release upload '${{ github.event.release.tag_name }}' bf42++.zip dsound.dll --clobber --repo '${{ github.repository }}'
