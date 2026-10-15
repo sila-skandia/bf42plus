@@ -857,7 +857,10 @@ public:
             g_settings.recordReplays.value = args[0] != 0;
             g_settings.recordReplays.dirty = true;
             g_settings.save(false);
-            if (!g_settings.recordReplays.value) replay_stop();
+            if (!g_settings.recordReplays.value)
+                replay_stop();
+            else
+                replay_begin(); // open the file now, not on the next event/frame
             hasreturnvalue = false;
         }
         return 0;

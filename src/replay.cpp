@@ -709,6 +709,14 @@ void replay_stop()
 // Events
 // ---------------------------------------------------------------------------
 
+// Begin recording now, if the setting is on and no file is open. Called from
+// the console when plus.recordReplays is set, so the file opens the moment the
+// user types plus.recordReplays 1 instead of waiting for the next event/frame.
+void replay_begin()
+{
+    replay_start();
+}
+
 static std::string setLevelLine(GameEvent* event, double t)
 {
     auto ev = reinterpret_cast<SetLevelEvent*>(event);
