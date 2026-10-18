@@ -670,8 +670,17 @@ static bool replay_start()
 
     char iso[64];
     strftime(iso, sizeof(iso), "%Y-%m-%dT%H:%M:%S", &lt);
-    writeLine(std::format("{{\"k\":\"h\",\"v\":{},\"plus\":\"{}\",\"start\":\"{}\",\"hz\":{}}}",
-        FORMAT_VERSION, jsonEscape(WideStringToISO88591(build_version)), iso, SAMPLE_HZ));
+    // `plus` is the marketing version out of version.h, bumped by hand and
+    // neither stamped by CI nor tied to a commit: every file ever recorded says
+    // "2.0", so it cannot answer "which recorder wrote this". `build` can --
+    // the compiler stamps it per build, so a file says whether it predates a
+    // given recorder change. That question was asked for real on 2026-10-18,
+    // of the missing `anim` table (bfstats
+    // features/soldier-locomotion-animation sec 8), and `plus` could not
+    // answer it.
+    writeLine(std::format("{{\"k\":\"h\",\"v\":{},\"plus\":\"{}\",\"build\":\"{}\",\"start\":\"{}\",\"hz\":{}}}",
+        FORMAT_VERSION, jsonEscape(WideStringToISO88591(build_version)),
+        jsonEscape(__DATE__ " " __TIME__), iso, SAMPLE_HZ));
     g_fileHasContent = false;
 
     debuglogt("replay: recording to %s\n", name);
@@ -1398,6 +1407,23 @@ static std::string readEngineString(const void* at)
     return jsonEscape(text, strnlen(text, raw.length));
 }
 
+// How many states the table may hold before we treat the pointer as garbage
+// rather than a table. This is only a sanity bound on a raw read: it has to
+// clear the largest table a real mod builds, and a mod's is nothing like
+// vanilla's. Measured from the installs (bf1942-models `extract_pose.py`
+// state_machine over each mod chain): bf1942 1,395 states, FHSWEurope 58,059
+// -- forty-two times vanilla, because FHSW copies the lower-body states per
+// weapon in hand (`LowersNormalWeapons.inc`: 924 Lb_RunForward* alone, 6,439
+// Lb_Crouch*). The old bound was 4,096, which vanilla and both expansion packs
+// cleared and every FHSW-family round failed, silently: the guard returned,
+// g_animStatesWritten stayed false, the caller retried it every sample tick
+// for the whole round, and the file ended with 15,000 "st" rows naming states
+// no table explained. The replay then read every soldier as standing, so a
+// crawling man played the idle clip and slid (bfstats
+// features/soldier-locomotion-animation). 2^18 leaves room for a mod larger
+// again than FHSW while still bounding the loop.
+static const size_t MAX_ANIM_STATES = 1 << 18;
+
 // The animation state table, once per file: index, name, flags.
 static void writeAnimStates(double t)
 {
@@ -1405,7 +1431,20 @@ static void writeAnimStates(double t)
     if (!table) return;
     uintptr_t begin = readAt<uintptr_t>((void*)table, 0x18);
     uintptr_t end = readAt<uintptr_t>((void*)table, 0x1C);
-    if (!begin || end < begin || (end - begin) / 4 > 4096) return;
+    if (!begin || end < begin) return;
+    // Say so in the file rather than returning in silence. The old bound did
+    // return silently, and the result was rounds carrying thousands of `st`
+    // rows against no table, which read downstream as every soldier standing
+    // -- diagnosed only by counting rows across four recordings. A file that
+    // states its own refusal costs one line and answers that directly.
+    const size_t count = (size_t)((end - begin) / 4);
+    if (count > MAX_ANIM_STATES) {
+        writeLine(std::format(
+            "{{\"k\":\"anim\",\"t\":{:.3f},\"skipped\":{},\"limit\":{},\"states\":[]}}",
+            t, count, MAX_ANIM_STATES));
+        g_animStatesWritten = true;
+        return;
+    }
     std::string out;
     for (uintptr_t at = begin; at < end; at += 4) {
         uintptr_t state = readAt<uintptr_t>((void*)at, 0);
