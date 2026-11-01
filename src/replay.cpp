@@ -50,7 +50,10 @@ static const int FLUSH_INTERVAL_MS = 2000;
 //    ("createObject", in the order they came), the projectile pools still
 //    standing ("projPool") and each player's latest kit ("pickupKit"), each
 //    with "ago", the seconds before the file began that it arrived, and
-//    "roster", who was playing when it began.
+//    "roster", who was playing when it began. Also within 5: "hm", the
+//    recording player's crosshair hit mark, {"k":"hm","t","pid","at"}, one
+//    line per mark the server acknowledged, "at" the reconstructed time of
+//    the hit (see sampleHitMark).
 static const int FORMAT_VERSION = 5;
 
 static FILE* g_file = nullptr;
@@ -77,6 +80,7 @@ struct PlayerState {
     int triggers;       // 1 fire held, 2 altfire held: the server's flags on BFPlayer
 };
 static std::map<int, PlayerState> g_players;
+static double g_hitLastAt = -1e9;   // the latest hit mark's reconstructed time ("hm")
 
 struct ControlPointState {
     int team;
@@ -659,6 +663,7 @@ static bool replay_start()
     g_lastFlushTick = GetTickCount();
     g_objects.clear();
     g_players.clear();
+    g_hitLastAt = -1e9;
     g_controlPoints.clear();
     g_parts.clear();
     g_engines.clear();
@@ -1135,6 +1140,36 @@ static int playerTriggers(BFPlayer* player)
     return (flags[0] ? 1 : 0) | (flags[1] ? 2 : 0);
 }
 
+// The recording player's crosshair hit mark. BF1942.exe keeps it as a float on
+// the BFPlayer at +0x1cc (CrossHair/HitIndicationTime is copied from it every
+// frame, 0x006aeba1). It is only ever SET to 1.0 (the dedicated server's
+// control-state bool at 0x00495a24, the listen server at 0x004a888f, the
+// SpecialGameEvent 1 handler at 0x00495616) and run down by the frame's dt and
+// held at 0 (0x00406890). So a sample of v > 0 at t puts the latest hit at
+// at = t - (1 - v).
+//
+// A new mark is a sample whose "at" is later than the previous sample's by
+// more than 50 ms. That is the same test as v > prev - (t - prevT) + 0.05: it
+// takes a plain rise, and a second hit that keeps the timer at (or near) 1.0
+// across samples (its "at" moves on although v does not go up). The 50 ms
+// absorbs the game's frame dt drifting from this clock. What it cannot see:
+// two hits between one pair of samples (one line, the later hit), and a hit
+// within 50 ms of the one before. A frame hitch where the game's dt runs short
+// of the wall clock can read as a mark. The first sample of a file with v > 0
+// is written too (a hit in the second before it began).
+static void sampleHitMark(double t)
+{
+    BFPlayer* local = BFPlayer::getLocal();
+    if (!local) return;
+    float v = 0.0f;
+    if (safeCopy(&v, (const uint8_t*)local + 0x1cc, sizeof(v)) != sizeof(v) || !(v > 0.0f && v <= 1.0f)) return;
+    const double at = t - (1.0 - v);
+    const bool mark = at > g_hitLastAt + 0.05;
+    g_hitLastAt = at;
+    if (mark)
+        writeLine(std::format("{{\"k\":\"hm\",\"t\":{:.3f},\"pid\":{},\"at\":{:.3f}}}", t, local->getId(), at));
+}
+
 static void samplePlayers(double t)
 {
     auto players = BFPlayer::getPlayers();
@@ -1166,6 +1201,7 @@ static void samplePlayers(double t)
         out += std::format("[{},{},{},{},{},{}]", pid, s.team, s.vehicleNetId, rootNetId, seat, s.triggers);
     }
     if (!out.empty()) writeLine(std::format("{{\"k\":\"p\",\"t\":{:.3f},\"p\":[{}]}}", t, out));
+    sampleHitMark(t);
 }
 
 static void sampleControlPoints(double t)
