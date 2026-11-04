@@ -110,16 +110,11 @@ jobs:
         name: windows-msvc-x86
         path: dist
 
-    # Two assets, one build. bf42++.zip is the loader install (all three files);
-    # dsound.dll is the same DLL again, standalone, for the drop-in install. It is
-    # left out of the zip so the download is not the same binary twice.
-    - name: Package
-      run: |
-        cd dist
-        zip -9 ../bf42++.zip bf42++.dll bf42++.exe bf42++BlackScreen.exe
-        cp dsound.dll ../dsound.dll
-
-    - name: Attach assets to the release
+    # One asset: dsound.dll, the drop-in install. Players copy one file into the
+    # game folder and start the game as usual. The bf42++.exe loader build is not
+    # released (it made players choose between two installs of the same DLL);
+    # it is still in the Actions artifact above.
+    - name: Attach dsound.dll to the release
       env:
         GH_TOKEN: ${{ github.token }}
-      run: gh release upload '${{ github.event.release.tag_name }}' bf42++.zip dsound.dll --clobber --repo '${{ github.repository }}'
+      run: gh release upload '${{ github.event.release.tag_name }}' dist/dsound.dll --clobber --repo '${{ github.repository }}'
