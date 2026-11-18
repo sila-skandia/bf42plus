@@ -110,8 +110,79 @@ static void __stdcall replay_onFireArms(IObject* fireArms, BFPlayer* player, con
 
 static void* s_replayOnFireArms = (void*)&replay_onFireArms;
 
+// The recording player's own radio. The server forwards a radio message to
+// everyone but its sender, whose game plays it from the radio menu's send
+// path instead (team radio 0x006D41C0, shouts 0x006D3320: the message to the
+// server, then the menu's own receive, 0x006D3400 / 0x006D2790, with the local
+// player). So a recording heard everybody's calls but its own. Hooked just
+// before that local receive, it is written as the `radio` event the others
+// arrive as, with `own` set.
+static int readPlayerId(BFPlayer* player)
+{
+    __try {
+        return player ? player->getId() : -1;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
+static void __stdcall replay_onLocalRadio(BFPlayer* player, int msg, int global)
+{
+    if (!replayFileOpen() || !player) return;
+    int pid = readPlayerId(player);
+    if (pid < 0) return;
+    writeLine(std::format("{{\"k\":\"e\",\"t\":{:.3f},\"e\":\"radio\",\"pid\":{},\"msg\":{},\"global\":{},\"own\":1}}",
+        replayNow(), pid, msg & 0xFFFF, global ? 1 : 0));
+}
+
+static void* s_replayOnLocalRadio = (void*)&replay_onLocalRadio;
+
+// `mov edx, [esi+0Ch]; push edx; push edi`: the message and the local player
+// pushed for the menu's own receive, in both send paths.
+static const uint8_t RADIO_SEND_BYTES[] = { 0x8B, 0x56, 0x0C, 0x52, 0x57 };
+
+static bool radioSiteIs(uintptr_t addr)
+{
+    uint8_t have[sizeof(RADIO_SEND_BYTES)];
+    return safeCopy(have, (void*)addr, sizeof(have)) == sizeof(have) && memcmp(have, RADIO_SEND_BYTES, sizeof(have)) == 0;
+}
+
+static void replay_hook_radio_init()
+{
+    if (!radioSiteIs(0x006D4244) || !radioSiteIs(0x006D33A4)) {
+        debuglogt("replay: the radio menu's send is not the expected code, the player's own radio is not recorded\n");
+        return;
+    }
+    // Team radio (the send path at 0x006D41C0).
+    BEGIN_ASM_CODE(team)
+        pushfd
+        pushad
+        push 1                          // over the team radio
+        push dword ptr [esi + 0x0C]     // the message
+        push edi                        // the local player
+        mov eax, s_replayOnLocalRadio
+        call eax                        // __stdcall, pops its three arguments
+        popad
+        popfd
+    MOVE_CODE_AND_ADD_CODE(team, 0x006D4244, 5, HOOK_ADD_ORIGINAL_AFTER);
+    // Shouts, heard within about 70 m (the send path at 0x006D3320).
+    BEGIN_ASM_CODE(shout)
+        pushfd
+        pushad
+        push 0
+        push dword ptr [esi + 0x0C]
+        push edi
+        mov eax, s_replayOnLocalRadio
+        call eax
+        popad
+        popfd
+    MOVE_CODE_AND_ADD_CODE(shout, 0x006D33A4, 5, HOOK_ADD_ORIGINAL_AFTER);
+}
+
 void replay_hook_init()
 {
+    replay_hook_radio_init();
     // The bytes the hook moves, checked before anything is patched: another
     // build of BF1942.exe (or another DLL's patch here) leaves Fire alone.
     static const uint8_t expected[] = { 0x8B, 0x95, 0x64, 0x02, 0x00, 0x00 };

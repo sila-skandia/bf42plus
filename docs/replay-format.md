@@ -118,7 +118,9 @@ A replay is one player's view, and the server does not send every client everyth
 - **The recording player's own soldier is predicted.** Its position is where the client put it,
   which may differ a little from where the server had it.
 - **Some records are the recording player's alone:** `hm`, the `hitFrom`, `special` and `fire`
-  events, and the radio messages he heard.
+  events, and the radio messages he heard. His own radio messages are written too, with `own`:
+  the server does not send a player's radio back to him, so they come from the radio menu's
+  send path, not from an event.
 
 ## Records
 
@@ -459,7 +461,7 @@ rest is not recorded.
 | `exitVehicle` | 0x0B | `pid` got out. The exits the server sends while tearing a round down are not recorded. |
 | `pickupKit` | 0x23 | `pid` took the kit `netId`. A player who had already spawned at the join gets none: his kit is his `createPlayer` `kitNetId`. |
 | `score` | 0x2A | `kind`, `pid`, `victim`, `weapon`, `bodypart`, and `weaponName` for a kill. See below. |
-| `radio` | 0x3A | `pid`, `msg` the message (below), `global` (1 over the team radio, 0 shouted to anyone within about 70 m) |
+| `radio` | 0x3A | `pid`, `msg` the message (below), `global` (1 over the team radio, 0 shouted to anyone within about 70 m); `own` 1 on the recording player's own, written from the radio menu as he sends it (the server never sends it back to him) |
 | `hitFrom` | 0x3C | The recording player was hurt, or the vehicle he is in was hit. `dir`, the side it came from, below; `strength`, 255 × the damage ÷ his full hit points. |
 | `fire` | | The recording player, `pid`, pressed fire, from his own input: one per press, not per round. `kind` 1 fire, 2 alternate fire alone (zooming in shows as 2); `weapon`, the template of what he controls, not the weapon; `pos` and `dir`, its position and +Z axis, `[0,0,0]` and `[0,0,1]` when he controls nothing. `f` has every round. |
 
