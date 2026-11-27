@@ -1,6 +1,6 @@
 // One sample of what hangs under the roots: turret and gun rotations (`jn`,
-// `j`), engines (`g`) and soldiers' bodies (`st`), with the animation state
-// table they refer to (`anim`). All of it is read at offsets in this
+// `j`), engines (`g`), soldiers' bodies (`st`), with the animation state
+// table they refer to (`anim`), and the heat of a soldier's kit part (`kh`). All of it is read at offsets in this
 // BF1942.exe, checked once before any of it is trusted.
 
 #include "replay_internal.h"
@@ -48,6 +48,11 @@ struct SoldierState {
 };
 static std::map<uint16_t, SoldierState> g_soldiers;
 static bool g_animStatesWritten = false;
+struct KitHeatState {
+    float heat;
+    int state;
+};
+static std::map<uint16_t, KitHeatState> g_kitHeat;
 
 void resetPartSampler()
 {
@@ -57,6 +62,7 @@ void resetPartSampler()
     g_nextChildId = 1;
     g_soldiers.clear();
     g_animStatesWritten = false;
+    g_kitHeat.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -126,6 +132,71 @@ static bool partsVerified()
     verified = ok ? 1 : 0;
     if (!ok) debuglogt("replay: vehicle parts, engines and soldier state do not match this BF1942.exe, not recorded\n");
     return ok;
+}
+
+// A soldier's heated kit part: Secret Weapons' jet pack, the one kit part
+// with heat in the three packs. menu::Soldier::update (0x006E9690) feeds the
+// HUD's `Recover` bar from it, and the same walk is done here:
+//
+//   the BFSoldier's ActiveKitParts are a list, its head at +0x13C and its
+//     count at +0x140 (0x006E988A); a node is { next, prev, part }, the part
+//     at +8;
+//   a part whose state (+0x120) is 4 -- waiting on its activater -- is
+//     passed over, and so is one whose template (+0x4C) gives it no heat:
+//     ActiveKitPart::hasHeat 0x005542F0 tests active + passive heat
+//     (template +0x248, +0x24C) > 0;
+//   the first part left is the HUD's: setRecoverData(3, heat), its heat at
+//     +0x128, 0 cool and 1 overheated, with no inversion.
+//
+// The heat is the client's own: its ActiveKitPart runs the heat law from the
+// part's state for every soldier it holds, the server sending the state, so a
+// replay gets the bar and the burn of every pack wearer in sight. The state
+// is 0 burning, 1 idling, 2 overheated, 3 off and 4 waiting on the activater.
+static bool kitHeatVerified()
+{
+    static int verified = -1;
+    if (verified >= 0) return verified == 1;
+    struct Code { uintptr_t at; uint8_t bytes[16]; size_t length; };
+    static const Code code[] = {
+        // the list's head, [soldier+13Ch]
+        { 0x006E9894, { 0x8B, 0x83, 0x3C, 0x01, 0x00, 0x00 }, 6 },
+        // the part, [node+8], and its state against 4, [part+120h]
+        { 0x006E98B0, { 0x8B, 0x4E, 0x08, 0x83, 0xB9, 0x20, 0x01, 0x00, 0x00, 0x04 }, 10 },
+        // its heat, [part+128h], to setRecoverData
+        { 0x006E98D7, { 0x8B, 0x4E, 0x08, 0xD9, 0x81, 0x28, 0x01, 0x00, 0x00 }, 9 },
+        // ActiveKitPart::hasHeat: [template+24Ch] + [template+248h]
+        { 0x005542F0, { 0x8B, 0x41, 0x4C, 0xD9, 0x80, 0x4C, 0x02, 0x00, 0x00, 0xD8, 0x80, 0x48, 0x02, 0x00, 0x00 }, 15 },
+    };
+    bool ok = true;
+    for (auto& c : code) {
+        uint8_t have[16] = {};
+        if (safeCopy(have, (void*)c.at, c.length) != c.length || memcmp(have, c.bytes, c.length) != 0) ok = false;
+    }
+    verified = ok ? 1 : 0;
+    if (!ok) debuglogt("replay: kit part heat does not match this BF1942.exe, not recorded\n");
+    return ok;
+}
+
+// The soldier's heated kit part, as the HUD picks it; false when he wears none.
+static bool kitHeatOf(const void* soldier, KitHeatState& out)
+{
+    uintptr_t head = readAt<uintptr_t>(soldier, 0x13C);
+    if (!head || readAt<int>(soldier, 0x140) <= 0) return false;
+    uintptr_t node = readAt<uintptr_t>((void*)head, 0);
+    // A soldier wears a handful of kit parts; the bound only guards the walk
+    // against a list read mid-change.
+    for (int n = 0; node && node != head && n < 16; n++) {
+        uintptr_t part = readAt<uintptr_t>((void*)node, 8);
+        if (part && readAt<int>((void*)part, 0x120) != 4) {
+            uintptr_t tmpl = readAt<uintptr_t>((void*)part, 0x4C);
+            if (tmpl && readAt<float>((void*)tmpl, 0x248) + readAt<float>((void*)tmpl, 0x24C) > 0.0f) {
+                out = KitHeatState{ readAt<float>((void*)part, 0x128), readAt<int>((void*)part, 0x120) };
+                return true;
+            }
+        }
+        node = readAt<uintptr_t>((void*)node, 0);
+    }
+    return false;
 }
 
 static IObject* rootObjectOf(IObject* obj)
@@ -227,7 +298,8 @@ static void writeAnimStates(double t)
 void sampleParts(double t)
 {
     if (!partsVerified()) return;
-    std::string joints, jointNames, engines, soldiers;
+    std::string joints, jointNames, engines, soldiers, kitHeat;
+    bool withKitHeat = kitHeatVerified();
     auto& allObjs = ObjectManager_getAllRegisteredObjects();
     for (auto node = allObjs.head->left; node != allObjs.head; node = node->next()) {
         auto obj = node->pair.second;
@@ -245,6 +317,15 @@ void sampleParts(double t)
                 readAt<uint16_t>(obj, 0x416), readAt<float>(obj, 0x2B0), readAt<float>(obj, 0x2B4),
             };
             uint16_t id = net->getID();
+            KitHeatState k{};
+            if (withKitHeat && kitHeatOf(obj, k)) {
+                auto was = g_kitHeat.find(id);
+                if (was == g_kitHeat.end() || was->second.state != k.state || fabsf(was->second.heat - k.heat) >= 0.005f) {
+                    g_kitHeat[id] = k;
+                    if (!kitHeat.empty()) kitHeat += ',';
+                    kitHeat += std::format("[{},{:.3f},{}]", id, k.heat, k.state);
+                }
+            }
             auto prev = g_soldiers.find(id);
             if (prev != g_soldiers.end() && prev->second.lower == s.lower && prev->second.upper == s.upper
                 && prev->second.item == s.item && prev->second.bits == s.bits
@@ -314,4 +395,5 @@ void sampleParts(double t)
     if (!joints.empty()) writeLine(std::format("{{\"k\":\"j\",\"t\":{:.3f},\"o\":[{}]}}", t, joints));
     if (!engines.empty()) writeLine(std::format("{{\"k\":\"g\",\"t\":{:.3f},\"o\":[{}]}}", t, engines));
     if (!soldiers.empty()) writeLine(std::format("{{\"k\":\"st\",\"t\":{:.3f},\"o\":[{}]}}", t, soldiers));
+    if (!kitHeat.empty()) writeLine(std::format("{{\"k\":\"kh\",\"t\":{:.3f},\"o\":[{}]}}", t, kitHeat));
 }

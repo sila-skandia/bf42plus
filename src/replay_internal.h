@@ -6,7 +6,7 @@
 //   replay_events.cpp   every game event the server sends, as an `e` record
 //   replay_join.cpp     the join's events and objects held for a file begun mid-round
 //   replay_objects.cpp  each sample: root objects, players, control points, tickets
-//   replay_parts.cpp    each sample: turrets, engines and soldiers' bodies
+//   replay_parts.cpp    each sample: turrets, engines, soldiers' bodies and kit part heat
 //   replay_fire.cpp     every round the client fires, and the hook that sees them
 //
 // docs/replay-format.md describes every record these write.

@@ -74,7 +74,7 @@ A change that breaks a reader would raise the version.
 
 Some records depend on this exact BF1942.exe. The recorder checks the game's code before it reads
 anything for them, and on another build of the game they are simply absent: `f`, hit points in
-`a` and `o`, `jn`, `j`, `g`, `st`, `anim` and `tk`.
+`a` and `o`, `jn`, `j`, `g`, `st`, `anim`, `kh` and `tk`.
 
 ## A file begun mid-round
 
@@ -138,6 +138,7 @@ A replay is one player's view, and the server does not send every client everyth
 | [`g`](#g-engines) | engines |
 | [`st`](#st-soldiers) | soldiers' animation states, aim and held item |
 | [`anim`](#anim-animation-states) | the animation state table, once |
+| [`kh`](#kh-kit-part-heat) | a jet pack's heat and state |
 | [`f`](#f-a-round-fired) | a round fired |
 | [`hm`](#hm-hit-mark) | the recording player's crosshair hit mark |
 | [`chat`](#chat-a-line-in-the-chat-box) | a line shown in the chat box |
@@ -145,7 +146,7 @@ A replay is one player's view, and the server does not send every client everyth
 | [`end`](#end-the-file-closed) | the file closed cleanly |
 
 Within one sample the records come in this order: `o` (one per new object), `s`, `a`, `d`,
-`anim` (once), `jn`, `j`, `g`, `st`, `tk`, `p`, `hm`, `cp`. An object's `o` always comes before
+`anim` (once), `jn`, `j`, `g`, `st`, `kh`, `tk`, `p`, `hm`, `cp`. An object's `o` always comes before
 the `s` that carries its first position.
 
 ### `h`: header
@@ -351,6 +352,28 @@ table's size, `limit` the most the recorder reads, and `states` is empty:
 ```json
 {"k":"anim","t":12.296,"skipped":300000,"limit":262144,"states":[]}
 ```
+
+### `kh`: kit part heat
+
+```json
+{"k":"kh","t":129.402,"o":[[7641,0.450,0],[7712,0.000,1]]}
+```
+
+`o` is a list of `[id, heat, state]`, one per soldier wearing a kit part with heat, written when
+the state changes or the heat moves by 0.005 or more. In the three packs that is Secret Weapons'
+jet pack (`GermanElite_RocketPack`, kit `GermanElite_JetPack`); a soldier without one never
+appears.
+
+| field | |
+| --- | --- |
+| `id` | network id of the soldier |
+| `heat` | the part's heat, 0 cool to 1 overheated: what the HUD's jet pack bar shows, filling as it heats |
+| `state` | 0 burning, 1 idling, 2 overheated, 3 off (masked off, or not yet lit), 4 waiting on its activater |
+
+It is the part the game's own HUD reads: the first of the soldier's active kit parts that is not in
+state 4 and has heat. The heat is this client's: the game runs the part's heat from its state for
+every soldier it holds, the server sending the state, so a burn shows as state 0 and the heat
+climbing. A soldier's last `kh` stands until his next one, and goes with him.
 
 ### `f`: a round fired
 
